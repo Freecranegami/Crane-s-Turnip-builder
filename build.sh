@@ -60,10 +60,17 @@ meson setup "$WORK/build" \
   -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dvideo-codecs= \
   -Dvulkan-beta=true -Dfreedreno-kmds=kgsl \
   -Degl=disabled -Dglx=disabled -Dgbm=disabled -Dllvm=disabled \
-  -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=disabled
+  -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=disabled \
+  -Dc_args=-w -Dcpp_args=-w
 
 echo "==> Building"
-ninja -C "$WORK/build" src/freedreno/vulkan/libvulkan_freedreno.so
+if ! ninja -C "$WORK/build" src/freedreno/vulkan/libvulkan_freedreno.so 2>&1 | tee "$WORK/ninja.log"; then
+  echo
+  echo "==================== COMPILER ERRORS ===================="
+  grep -n -B3 -A8 "error:" "$WORK/ninja.log" | head -150 || true
+  echo "========================================================="
+  exit 1
+fi
 
 echo "==> Packaging (adrenotools format)"
 PKG="$WORK/pkg"; mkdir -p "$PKG"

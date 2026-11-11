@@ -56,10 +56,12 @@ jobs:
 
       - name: Setup NDK
         if: steps.check.outputs.skip == 'false'
-        uses: nttld/setup-ndk@v1
         id: ndk
-        with:
-          ndk-version: ${{ steps.cfg.outputs.ndk }}
+        run: |
+          NDK="android-ndk-${{ steps.cfg.outputs.ndk }}"
+          curl -fsSL -o "$RUNNER_TEMP/ndk.zip" "https://dl.google.com/android/repository/${NDK}-linux.zip"
+          unzip -q "$RUNNER_TEMP/ndk.zip" -d "$RUNNER_TEMP"
+          echo "ndk-path=$RUNNER_TEMP/$NDK" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v4
         if: steps.check.outputs.skip == 'false'

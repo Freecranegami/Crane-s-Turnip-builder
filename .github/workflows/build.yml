@@ -1,0 +1,82 @@
+name: Build Turnip
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"     # check upstream every 6 hours
+  push:
+    paths: ["patches/**", "build.sh", "config.env", ".github/workflows/build.yml"]
+  workflow_dispatch:
+    inputs:
+      mesa_ref:
+        description: "Mesa branch/tag (blank = config.env default)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load config
+        id: cfg
+        run: |
+          source config.env
+          REF="${{ github.event.inputs.mesa_ref }}"
+          REF="${REF:-$MESA_REF}"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "ndk=$NDK_VERSION" >> "$GITHUB_OUTPUT"
+          SHA=$(git ls-remote "$MESA_REPO" "$REF" | cut -c1-7 | head -n1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if already released (scheduled runs only)
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="mesa-${{ steps.cfg.outputs.sha }}"
+          if [ "${{ github.event_name }}" = "schedule" ] && gh release view "$TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build python3-mako python3-yaml \
+            glslang-tools bison flex pkg-config ccache zip patchelf libdrm-dev
+
+      - name: Setup NDK
+        if: steps.check.outputs.skip == 'false'
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: ${{ steps.cfg.outputs.ndk }}
+
+      - uses: actions/cache@v4
+        if: steps.check.outputs.skip == 'false'
+        with:
+          path: ~/.ccache
+          key: ccache-${{ steps.cfg.outputs.sha }}
+          restore-keys: ccache-
+
+      - name: Build
+        if: steps.check.outputs.skip == 'false'
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: ./build.sh "${{ steps.cfg.outputs.ref }}"
+
+      - name: Release
+        if: steps.check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="mesa-${{ steps.cfg.outputs.sha }}"
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" out/*.zip \
+            --title "Turnip @ Mesa ${{ steps.cfg.outputs.sha }}" \
+            --notes "Mesa ${{ steps.cfg.outputs.ref }} @ ${{ steps.cfg.outputs.sha }} with patches from /patches"

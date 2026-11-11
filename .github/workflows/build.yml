@@ -47,8 +47,12 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build python3-mako python3-yaml \
+          sudo apt-get install -y ninja-build python3-pip python3-mako python3-yaml \
             glslang-tools bison flex pkg-config ccache zip patchelf libdrm-dev
+          # Ubuntu's meson is too old for current Mesa (needs >= 1.7), so use pip's
+          python3 -m pip install --user --break-system-packages "meson>=1.7.0" packaging
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/meson" --version
 
       - name: Setup NDK
         if: steps.check.outputs.skip == 'false'

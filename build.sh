@@ -57,8 +57,8 @@ meson setup "$WORK/build" \
   -Dbuildtype=release -Db_lto=false -Dstrip=true \
   -Dplatforms=android -Dplatform-sdk-version="$PLATFORM_SDK_VERSION" \
   -Dandroid-stub=true -Dandroid-libbacktrace=disabled \
-  -Dgallium-drivers= -Dvulkan-drivers=freedreno \
-  -Dfreedreno-kmds=kgsl \
+  -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dvideo-codecs= \
+  -Dvulkan-beta=true -Dfreedreno-kmds=kgsl \
   -Degl=disabled -Dglx=disabled -Dgbm=disabled -Dllvm=disabled \
   -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=disabled
 

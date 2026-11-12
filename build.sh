@@ -51,25 +51,56 @@ endian = 'little'
 EOF
 mkdir -p "$WORK/pkgconfig"
 
-echo "==> Configuring"
-meson setup "$WORK/build" \
-  --cross-file "$WORK/cross.txt" \
-  -Dbuildtype=release -Db_lto=false -Dstrip=true \
-  -Dplatforms=android -Dplatform-sdk-version="$PLATFORM_SDK_VERSION" \
-  -Dandroid-stub=true -Dandroid-libbacktrace=disabled \
-  -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dvideo-codecs= \
-  -Dvulkan-beta=true -Dfreedreno-kmds=kgsl \
-  -Degl=disabled -Dglx=disabled -Dgbm=disabled -Dllvm=disabled \
-  -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=disabled \
-  -Dc_args=-w -Dcpp_args=-w
+# Configure and build once. $1 = thin (ThinLTO) or off. Returns non-zero on any failure, so the caller can fall back.
+build_driver() {
+  local lto_mode="$1"
+  local lto_args=(-Db_lto=false)
+  if [ "$lto_mode" = "thin" ]; then
+    lto_args=(-Db_lto=true -Db_lto_mode=thin)
+  fi
 
-echo "==> Building"
-if ! ninja -C "$WORK/build" src/freedreno/vulkan/libvulkan_freedreno.so 2>&1 | tee "$WORK/ninja.log"; then
+  rm -rf "$WORK/build"
+  echo "==> Configuring (LTO: $lto_mode)"
+  meson setup "$WORK/build" \
+    --cross-file "$WORK/cross.txt" \
+    -Dbuildtype=release "${lto_args[@]}" -Dstrip=true \
+    -Dplatforms=android -Dplatform-sdk-version="$PLATFORM_SDK_VERSION" \
+    -Dandroid-stub=true -Dandroid-libbacktrace=disabled \
+    -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dvideo-codecs= \
+    -Dvulkan-beta=true -Dfreedreno-kmds=kgsl \
+    -Degl=disabled -Dglx=disabled -Dgbm=disabled -Dllvm=disabled \
+    -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=disabled \
+    -Dc_args=-w -Dcpp_args=-w 2>&1 | tee "$WORK/meson-$lto_mode.log"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || return 1
+
+  echo "==> Building (LTO: $lto_mode)"
+  ninja -C "$WORK/build" src/freedreno/vulkan/libvulkan_freedreno.so 2>&1 | tee "$WORK/ninja-$lto_mode.log"
+  [ "${PIPESTATUS[0]}" -eq 0 ] || return 1
+}
+
+print_errors() {
   echo
-  echo "==================== COMPILER ERRORS ===================="
-  grep -n -B3 -A8 "error:" "$WORK/ninja.log" | head -150 || true
+  echo "==================== COMPILER ERRORS ($1) ===================="
+  grep -n -B3 -A8 -e "error:" -e "ERROR:" "$WORK/ninja-$1.log" "$WORK/meson-$1.log" 2>/dev/null | head -150 || true
   echo "========================================================="
-  exit 1
+}
+
+# ThinLTO trims the driver's CPU-side overhead a little. It is the least tested part of the build, so if it fails for
+# any reason (a new upstream, a toolchain quirk) report why and fall back to the plain build instead of losing the release.
+LTO_USED="off"
+if [ "${LTO:-thin}" = "thin" ]; then
+  if build_driver thin; then
+    LTO_USED="thin"
+  else
+    print_errors thin
+    echo "!! ThinLTO build failed, retrying without LTO"
+  fi
+fi
+if [ "$LTO_USED" = "off" ]; then
+  if ! build_driver off; then
+    print_errors off
+    exit 1
+  fi
 fi
 
 echo "==> Packaging (adrenotools format)"
@@ -79,7 +110,7 @@ cat > "$PKG/meta.json" <<EOF
 {
   "schemaVersion": 1,
   "name": "$DRIVER_NAME $MESA_SHA",
-  "description": "Turnip from Mesa $REF @ $MESA_SHA + custom patches",
+  "description": "Turnip from Mesa $REF @ $MESA_SHA + custom patches (LTO: $LTO_USED)",
   "author": "custom",
   "packageVersion": "1",
   "vendor": "Mesa",

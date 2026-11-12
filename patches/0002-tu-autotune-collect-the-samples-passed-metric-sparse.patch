@@ -1,0 +1,100 @@
+From 25ec349ed6932de1d464bbd45b8c5158804417b8 Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Thu, 12 Nov 2026 12:56:49 +0000
+Subject: [PATCH 2/4] tu/autotune: collect the samples-passed metric sparsely
+ once converged
+
+The bandwidth algorithm needs a handful of samples-passed results per render
+pass to settle on a mean. Afterwards, collecting it for every instance only
+costs extra ZPASS_DONE events and BO write-backs. Keep collecting for the first
+32 results, then for every 16th instance so the mean still follows scene changes.
+
+TU_AUTOTUNE_RESAMPLE_PERIOD=<1..1024> overrides the period (1 = stock).
+---
+ src/freedreno/vulkan/tu_autotune.cc | 45 ++++++++++++++++++++++++++++-
+ 1 file changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index 7c98c38..4c36fa1 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -112,6 +112,23 @@ sysmem_penalty_percent()
+    return percent;
+ }
+ 
++/* Once the samples-passed average of a render pass has converged, only every Nth instance of that render pass still
++ * collects the metric. Collecting it costs extra ZPASS_DONE events on the GPU and a BO write-back for every instance.
++ *
++ * 1 collects for every instance (stock behaviour). Override with TU_AUTOTUNE_RESAMPLE_PERIOD (1..1024).
++ */
++constexpr uint32_t RESAMPLE_PERIOD_DEFAULT = 16;
++
++static uint32_t
++resample_period()
++{
++   static const uint32_t period = []() {
++      long value = debug_get_num_option("TU_AUTOTUNE_RESAMPLE_PERIOD", RESAMPLE_PERIOD_DEFAULT);
++      return (uint32_t) CLAMP(value, 1, 1024);
++   }();
++   return period;
++}
++
+ /** Configuration **/
+ 
+ enum class tu_autotune::algorithm : uint8_t {
+@@ -191,6 +208,12 @@ struct PACKED tu_autotune::config_t {
+       return true;
+    }
+ 
++   /* Drops a metric for an individual entry, the algorithm and the other metrics stay as they are. */
++   constexpr void clear(metric_flag f)
++   {
++      metric_flags &= ~(uint8_t) f;
++   }
++
+    constexpr bool disable(mod_flag f)
+    {
+       if (!(mod_flags & (uint8_t) f))
+@@ -1003,10 +1026,25 @@ struct tu_autotune::rp_history {
+     private:
+       exponential_average<uint32_t> mean_samples_passed;
+ 
++      /* Amount of results the average needs before it is trusted, and counters for the sparse sampling afterwards. */
++      static constexpr uint32_t CONVERGENCE_UPDATES = 32;
++      std::atomic<uint32_t> update_count = 0;
++      std::atomic<uint32_t> instance_count = 0;
++
+     public:
+       void update(uint32_t samples)
+       {
+          mean_samples_passed.add(samples);
++         if (update_count.load(std::memory_order_relaxed) < CONVERGENCE_UPDATES)
++            update_count.fetch_add(1, std::memory_order_relaxed);
++      }
++
++      /* Whether the next instance of this render pass should collect the samples-passed metric. */
++      bool should_sample()
++      {
++         if (update_count.load(std::memory_order_relaxed) < CONVERGENCE_UPDATES)
++            return true;
++         return instance_count.fetch_add(1, std::memory_order_relaxed) % resample_period() == 0;
+       }
+ 
+       render_mode get_optimal_mode(rp_history &history,
+@@ -1897,7 +1935,12 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
+          history.preempt_optimize.mark_as_latency_sensitive();
+       }
+    }
+-   *rp_ctx = cb_ctx.attach_rp_entry(device, history, config, rp_state->drawcall_count);
++   /* The entry keeps its own copy of the config, so dropping the metric here only affects this instance. */
++   config_t entry_config = config;
++   if (config.is_enabled(algorithm::BANDWIDTH) && !history.bandwidth.should_sample())
++      entry_config.clear(metric_flag::SAMPLES);
++
++   *rp_ctx = cb_ctx.attach_rp_entry(device, history, entry_config, rp_state->drawcall_count);
+ 
+    if (config.test(mod_flag::PREEMPT_OPTIMIZE) && history.preempt_optimize.is_latency_sensitive()) {
+       /* Try to mitigate the risk of high preemption latency by always using GMEM, which should break up any larger
+-- 
+2.43.0
+

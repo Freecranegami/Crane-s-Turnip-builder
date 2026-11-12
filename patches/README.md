@@ -20,3 +20,9 @@ Plain diffs (`*.diff` / `git diff > x.patch`) also work and are applied with `gi
 
 If a patch no longer applies, the CI build fails and tells you which one.
 Rebase it against current Mesa, regenerate, commit.
+
+## Current series
+
+`0001` to `0004` are described in the top-level README. They are written against Mesa `main` and use small anchored
+hunks so `git am --3way` can usually carry them across upstream changes. When one stops applying, regenerate it
+the way described above and keep the number prefix.

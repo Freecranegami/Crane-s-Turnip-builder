@@ -1,0 +1,62 @@
+From 30168d7efd656c04dea82e707e15697de455a95a Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Thu, 12 Nov 2026 12:57:17 +0000
+Subject: [PATCH 3/4] tu: log uncompressed full-size color attachments with
+ TU_DEBUG=perf
+
+A full-size color attachment without UBWC is read and written at full memory
+bandwidth every frame. Report it, with the usual reasons, once the final
+layout is known so that swapchain images with an explicit modifier are not
+reported incorrectly.
+
+With TU_DEBUG=startup the kernel's UBWC version and highest bank bit are
+logged as well, which shows what the kernel reports for the device.
+---
+ src/freedreno/vulkan/tu_image.cc    | 16 ++++++++++++++++
+ src/freedreno/vulkan/tu_knl_kgsl.cc |  3 +++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/src/freedreno/vulkan/tu_image.cc b/src/freedreno/vulkan/tu_image.cc
+index 35aa429..94907ae 100644
+--- a/src/freedreno/vulkan/tu_image.cc
++++ b/src/freedreno/vulkan/tu_image.cc
+@@ -612,6 +612,22 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
+       image->total_size = MAX2(image->total_size, layout->size);
+    }
+ 
++   /* An uncompressed full-size color attachment means every frame reads and writes it at full bandwidth, which shows up
++    * as extra power draw and heat. Say so with TU_DEBUG=perf, including the usual reasons, so that it can be spotted
++    * without a debugger. This is the final state, after modifiers and layout fallbacks have been applied.
++    */
++   if (!image->layout[0].ubwc &&
++       (image->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
++       image->vk.extent.width >= 256 && image->vk.extent.height >= 256) {
++      perf_debug(device,
++                 "%ux%u %s color attachment has no UBWC (linear=%d, mutable=%d, samples=%u, mips=%u, "
++                 "modifier_linear=%d, TU_DEBUG=noubwc=%d)",
++                 image->vk.extent.width, image->vk.extent.height,
++                 util_format_name(vk_format_to_pipe_format(image->vk.format)),
++                 image->force_linear_tile, image->is_mutable, (unsigned) image->vk.samples,
++                 image->vk.mip_levels, modifier == DRM_FORMAT_MOD_LINEAR, TU_DEBUG(NOUBWC) ? 1 : 0);
++   }
++
+    image->max_tile_w_constraint_fdm = ~0;
+    image->max_tile_h_constraint_fdm = ~0;
+ 
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index c01160e..f792356 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -1811,6 +1811,9 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
+                      sizeof(ubwc_version)))
+       goto fail;
+ 
++   if (TU_DEBUG(STARTUP))
++      mesa_logi("kgsl: ubwc_version=%u highest_bank_bit=%u", ubwc_version, highest_bank_bit);
++
+    if (get_kgsl_prop(fd, KGSL_PROP_UCHE_TRAP_BASE, &device->uche_trap_base,
+                      sizeof(device->uche_trap_base))) {
+       /* It is known to be hardcoded to */
+-- 
+2.43.0
+

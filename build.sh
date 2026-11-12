@@ -21,15 +21,43 @@ MESA_SHA="$(git rev-parse --short HEAD)"
 git config user.name  "turnip-ci"
 git config user.email "turnip-ci@localhost"
 
+# Explain why a patch no longer applies: the rejected hunks plus the current upstream code around them.
+explain_patch_failure() {
+  local p="$1" rej f start
+  echo
+  echo "==================== PATCH FAILURE: $(basename "$p") ===================="
+  git apply --reject --whitespace=nowarn "$p" 2>&1 | head -40 || true
+  for rej in $(git ls-files --others --exclude-standard | grep '\.rej$' || true); do
+    f="${rej%.rej}"
+    echo "---- rejected hunks ($rej):"
+    cat "$rej"
+    for start in $(grep -o '^@@ -[0-9]*' "$rej" | tr -d '@ -'); do
+      echo "---- current upstream $f, lines $((start > 40 ? start - 40 : 1)) onwards:"
+      sed -n "$((start > 40 ? start - 40 : 1)),$((start + 70))p" "$f"
+    done
+  done
+  echo "======================================================================="
+  git checkout -q -- . 2>/dev/null || true
+  git clean -fdq 2>/dev/null || true
+}
+
 echo "==> Applying patches"
 shopt -s nullglob
+FAILED_PATCHES=()
 for p in "$ROOT"/patches/*.patch "$ROOT"/patches/*.diff; do
   echo "   - $(basename "$p")"
-  if ! git am --3way "$p" 2>/dev/null; then
+  if ! git am --3way "$p" >/dev/null 2>&1; then
     git am --abort 2>/dev/null || true
-    git apply --3way --index "$p" || { echo "!! Patch failed: $p"; exit 1; }
+    if ! git apply --3way --index "$p" >/dev/null 2>&1; then
+      FAILED_PATCHES+=("$(basename "$p")")
+      explain_patch_failure "$p"
+    fi
   fi
 done
+if [ "${#FAILED_PATCHES[@]}" -gt 0 ]; then
+  echo "!! Patches that no longer apply: ${FAILED_PATCHES[*]}"
+  exit 1
+fi
 
 echo "==> Writing cross file"
 TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"

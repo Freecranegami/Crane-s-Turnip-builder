@@ -1,4 +1,4 @@
-From 30168d7efd656c04dea82e707e15697de455a95a Mon Sep 17 00:00:00 2001
+From 9a010d3caeec335063ddfdb3c2de999c74554b50 Mon Sep 17 00:00:00 2001
 From: turnip-custom <turnip-custom@localhost>
 Date: Thu, 12 Nov 2026 12:57:17 +0000
 Subject: [PATCH 3/4] tu: log uncompressed full-size color attachments with
@@ -20,9 +20,7 @@ diff --git a/src/freedreno/vulkan/tu_image.cc b/src/freedreno/vulkan/tu_image.cc
 index 35aa429..94907ae 100644
 --- a/src/freedreno/vulkan/tu_image.cc
 +++ b/src/freedreno/vulkan/tu_image.cc
-@@ -612,6 +612,22 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
-       image->total_size = MAX2(image->total_size, layout->size);
-    }
+@@ -614,2 +614,18 @@ tu_image_update_layout(struct tu_device *device, struct tu_image *image,
  
 +   /* An uncompressed full-size color attachment means every frame reads and writes it at full bandwidth, which shows up
 +    * as extra power draw and heat. Say so with TU_DEBUG=perf, including the usual reasons, so that it can be spotted
@@ -41,22 +39,16 @@ index 35aa429..94907ae 100644
 +   }
 +
     image->max_tile_w_constraint_fdm = ~0;
-    image->max_tile_h_constraint_fdm = ~0;
- 
 diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
 index c01160e..f792356 100644
 --- a/src/freedreno/vulkan/tu_knl_kgsl.cc
 +++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
-@@ -1811,6 +1811,9 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
-                      sizeof(ubwc_version)))
-       goto fail;
+@@ -1813,2 +1813,5 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
  
 +   if (TU_DEBUG(STARTUP))
 +      mesa_logi("kgsl: ubwc_version=%u highest_bank_bit=%u", ubwc_version, highest_bank_bit);
 +
     if (get_kgsl_prop(fd, KGSL_PROP_UCHE_TRAP_BASE, &device->uche_trap_base,
-                      sizeof(device->uche_trap_base))) {
-       /* It is known to be hardcoded to */
 -- 
 2.43.0
 

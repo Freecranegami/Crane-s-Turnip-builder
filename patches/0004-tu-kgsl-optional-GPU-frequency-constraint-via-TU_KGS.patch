@@ -1,4 +1,4 @@
-From 0c3bf9ddbe3e01686dfb550db356111d55038d54 Mon Sep 17 00:00:00 2001
+From 230b34bbd5fb5ea9d4c91634be3e26d041ac7ad2 Mon Sep 17 00:00:00 2001
 From: turnip-custom <turnip-custom@localhost>
 Date: Thu, 12 Nov 2026 12:57:36 +0000
 Subject: [PATCH 4/4] tu/kgsl: optional GPU frequency constraint via
@@ -16,9 +16,7 @@ diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_k
 index f792356..7280ea7 100644
 --- a/src/freedreno/vulkan/tu_knl_kgsl.cc
 +++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
-@@ -47,21 +47,72 @@ safe_ioctl(int fd, unsigned long request, void *arg)
-    return ret;
- }
+@@ -49,2 +49,21 @@ safe_ioctl(int fd, unsigned long request, void *arg)
  
 +/* Optional GPU frequency constraint, as a percentage of the maximum GPU frequency (2..100).
 + *
@@ -40,18 +38,18 @@ index f792356..7280ea7 100644
 +}
 +
  static int
- kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+@@ -52,2 +71,4 @@ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
  {
 +   const uint32_t pwr_percent = kgsl_pwr_percent();
 +
     struct kgsl_drawctxt_create req = {
-       .flags = KGSL_CONTEXT_SAVE_GMEM |
+@@ -55,3 +76,4 @@ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
                KGSL_CONTEXT_NO_GMEM_ALLOC |
 -              KGSL_CONTEXT_PREAMBLE,
 +              KGSL_CONTEXT_PREAMBLE |
 +              (pwr_percent ? (unsigned) KGSL_CONTEXT_PWR_CONSTRAINT : 0u),
     };
- 
+@@ -59,2 +81,7 @@ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
     int ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req);
 +   if (ret && pwr_percent) {
 +      /* A kernel that does not know the power constraint flag may reject the context, so retry without it. */
@@ -59,9 +57,7 @@ index f792356..7280ea7 100644
 +      ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req);
 +   }
     if (ret)
-       return ret;
- 
-    queue->msm_queue_id = req.drawctxt_id;
+@@ -64,2 +91,26 @@ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
  
 +   if (pwr_percent && (req.flags & KGSL_CONTEXT_PWR_CONSTRAINT)) {
 +      struct kgsl_device_constraint_pwrlevel pwrlevel = {
@@ -88,8 +84,6 @@ index f792356..7280ea7 100644
 +   }
 +
     return 0;
- }
- 
 -- 
 2.43.0
 

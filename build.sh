@@ -33,7 +33,7 @@ explain_patch_failure() {
     cat "$rej"
     for start in $(grep -o '^@@ -[0-9]*' "$rej" | tr -d '@ -'); do
       echo "---- current upstream $f, lines $((start > 40 ? start - 40 : 1)) onwards:"
-      sed -n "$((start > 40 ? start - 40 : 1)),$((start + 70))p" "$f"
+      sed -n "$((start > 40 ? start - 40 : 1)),$((start + 140))p" "$f"
     done
   done
   echo "======================================================================="

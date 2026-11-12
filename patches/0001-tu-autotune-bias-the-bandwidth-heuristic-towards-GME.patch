@@ -16,17 +16,11 @@ diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autot
 index 028e928..7c98c38 100644
 --- a/src/freedreno/vulkan/tu_autotune.cc
 +++ b/src/freedreno/vulkan/tu_autotune.cc
-@@ -13,6 +13,7 @@
- #include <string_view>
- 
+@@ -15,2 +15,3 @@
  #include "util/rand_xor.h"
 +#include "util/u_debug.h"
  
- #define XXH_INLINE_ALL
- #include "util/xxhash.h"
-@@ -91,6 +92,26 @@ render_mode_str(tu_autotune::render_mode mode)
-    }
- }
+@@ -93,2 +94,22 @@ render_mode_str(tu_autotune::render_mode mode)
  
 +/* How much more expensive SYSMEM rendering is considered to be than the raw bandwidth estimate says, in percent.
 + *
@@ -49,18 +43,12 @@ index 028e928..7c98c38 100644
 +}
 +
  /** Configuration **/
- 
- enum class tu_autotune::algorithm : uint8_t {
-@@ -1030,7 +1051,8 @@ struct tu_autotune::rp_history {
-           */
-          gmem_bandwidth = (gmem_bandwidth * 11 + total_draw_call_bandwidth) / 10;
+@@ -1032,3 +1053,4 @@ struct tu_autotune::rp_history {
  
 -         bool select_sysmem = sysmem_bandwidth <= gmem_bandwidth;
 +         /* Bias near-ties towards GMEM, see sysmem_penalty_percent(). */
 +         bool select_sysmem = (sysmem_bandwidth * sysmem_penalty_percent()) / 100 <= gmem_bandwidth;
           render_mode mode = select_sysmem ? render_mode::SYSMEM : render_mode::GMEM;
- 
-          UNUSED const VkExtent2D &extent = cmd_state->render_areas[0].extent;
 -- 
 2.43.0
 

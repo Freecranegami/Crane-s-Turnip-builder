@@ -1,4 +1,4 @@
-From 25ec349ed6932de1d464bbd45b8c5158804417b8 Mon Sep 17 00:00:00 2001
+From 61888106d83250e366f757d3339d98cec18c1943 Mon Sep 17 00:00:00 2001
 From: turnip-custom <turnip-custom@localhost>
 Date: Thu, 12 Nov 2026 12:56:49 +0000
 Subject: [PATCH 2/4] tu/autotune: collect the samples-passed metric sparsely
@@ -15,12 +15,10 @@ TU_AUTOTUNE_RESAMPLE_PERIOD=<1..1024> overrides the period (1 = stock).
  1 file changed, 44 insertions(+), 1 deletion(-)
 
 diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
-index 7c98c38..4c36fa1 100644
+index 7c98c38..ff77e89 100644
 --- a/src/freedreno/vulkan/tu_autotune.cc
 +++ b/src/freedreno/vulkan/tu_autotune.cc
-@@ -112,6 +112,23 @@ sysmem_penalty_percent()
-    return percent;
- }
+@@ -114,2 +114,19 @@ sysmem_penalty_percent()
  
 +/* Once the samples-passed average of a render pass has converged, only every Nth instance of that render pass still
 + * collects the metric. Collecting it costs extra ZPASS_DONE events on the GPU and a BO write-back for every instance.
@@ -40,24 +38,16 @@ index 7c98c38..4c36fa1 100644
 +}
 +
  /** Configuration **/
- 
- enum class tu_autotune::algorithm : uint8_t {
-@@ -191,6 +208,12 @@ struct PACKED tu_autotune::config_t {
-       return true;
-    }
+@@ -193,2 +210,8 @@ struct PACKED tu_autotune::config_t {
  
 +   /* Drops a metric for an individual entry, the algorithm and the other metrics stay as they are. */
 +   constexpr void clear(metric_flag f)
 +   {
-+      metric_flags &= ~(uint8_t) f;
++      metric_flags &= ~static_cast<uint8_t>(f);
 +   }
 +
     constexpr bool disable(mod_flag f)
-    {
-       if (!(mod_flags & (uint8_t) f))
-@@ -1003,10 +1026,25 @@ struct tu_autotune::rp_history {
-     private:
-       exponential_average<uint32_t> mean_samples_passed;
+@@ -1005,2 +1028,7 @@ struct tu_autotune::rp_history {
  
 +      /* Amount of results the average needs before it is trusted, and counters for the sparse sampling afterwards. */
 +      static constexpr uint32_t CONVERGENCE_UPDATES = 32;
@@ -65,8 +55,7 @@ index 7c98c38..4c36fa1 100644
 +      std::atomic<uint32_t> instance_count = 0;
 +
      public:
-       void update(uint32_t samples)
-       {
+@@ -1009,2 +1037,12 @@ struct tu_autotune::rp_history {
           mean_samples_passed.add(samples);
 +         if (update_count.load(std::memory_order_relaxed) < CONVERGENCE_UPDATES)
 +            update_count.fetch_add(1, std::memory_order_relaxed);
@@ -79,11 +68,7 @@ index 7c98c38..4c36fa1 100644
 +            return true;
 +         return instance_count.fetch_add(1, std::memory_order_relaxed) % resample_period() == 0;
        }
- 
-       render_mode get_optimal_mode(rp_history &history,
-@@ -1897,7 +1935,12 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
-          history.preempt_optimize.mark_as_latency_sensitive();
-       }
+@@ -1899,3 +1937,8 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
     }
 -   *rp_ctx = cb_ctx.attach_rp_entry(device, history, config, rp_state->drawcall_count);
 +   /* The entry keeps its own copy of the config, so dropping the metric here only affects this instance. */
@@ -93,8 +78,6 @@ index 7c98c38..4c36fa1 100644
 +
 +   *rp_ctx = cb_ctx.attach_rp_entry(device, history, entry_config, rp_state->drawcall_count);
  
-    if (config.test(mod_flag::PREEMPT_OPTIMIZE) && history.preempt_optimize.is_latency_sensitive()) {
-       /* Try to mitigate the risk of high preemption latency by always using GMEM, which should break up any larger
 -- 
 2.43.0
 

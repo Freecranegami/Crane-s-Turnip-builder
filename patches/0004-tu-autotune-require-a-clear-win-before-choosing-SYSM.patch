@@ -1,0 +1,33 @@
+From 33cbb8add0682d158775e6d2496cba08a803794a Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Fri, 20 Nov 2026 08:52:58 +0000
+Subject: [PATCH 4/4] tu/autotune: require a clear win before choosing SYSMEM
+
+SYSMEM traffic goes to DDR while GMEM traffic stays on chip, so equal byte
+estimates do not cost equal energy. Pick SYSMEM only when its bandwidth
+estimate beats GMEM by at least TU_AUTOTUNE_SYSMEM_MARGIN percent (default 10,
+0 restores the stock comparison), so near-ties go to GMEM and use less DDR.
+---
+ src/freedreno/vulkan/tu_autotune.cc | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index 8137849..d0aade4 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -1095,7 +1095,11 @@ struct tu_autotune::rp_history {
+           */
+          gmem_bandwidth = (gmem_bandwidth * 11 + total_draw_call_bandwidth) / 10;
+ 
+-         bool select_sysmem = sysmem_bandwidth <= gmem_bandwidth;
++         /* SYSMEM traffic goes to DDR while GMEM traffic stays on chip, so equal byte counts are not equal energy. Only
++          * pick SYSMEM when its estimate wins by at least TU_AUTOTUNE_SYSMEM_MARGIN percent (default 10, 0 = stock).
++          */
++         static const uint64_t sysmem_margin = autotune_env_u32("TU_AUTOTUNE_SYSMEM_MARGIN", 10, 0, 50);
++         bool select_sysmem = sysmem_bandwidth * 100 <= gmem_bandwidth * (100 - sysmem_margin);
+          render_mode mode = select_sysmem ? render_mode::SYSMEM : render_mode::GMEM;
+ 
+          UNUSED const VkExtent2D &extent = cmd_state->render_areas[0].extent;
+-- 
+2.43.0
+

@@ -25,23 +25,26 @@ Needs: meson, ninja, python3-mako, python3-yaml, glslang, bison, flex, zip, ccac
 
 ## Included patches (applied to every build)
 
-These target power draw and heat in native Android games. Each one has a switch, so a build can be A/B tested without
-rebuilding. Set the variables in the environment of the game process (the same place as `TU_DEBUG`).
+These target power draw and heat in native Android games while keeping frame rates about the same. Each one has a
+switch, so a build can be A/B tested without rebuilding. Set the variables in the environment of the game process
+(the same place as `TU_DEBUG`).
 
 | Patch | What it does | Switch | Default |
 |---|---|---|---|
-| `0001` autotune GMEM bias | Counts SYSMEM (straight-to-DDR) rendering as more expensive, so near-ties go to on-chip tiled rendering (GMEM) | `TU_AUTOTUNE_SYSMEM_PENALTY=50..400` | `125` (`100` = stock) |
-| `0002` sparse sampling | After a render pass's average has settled, collects the per-pass pixel counter for 1 in N instances instead of all | `TU_AUTOTUNE_RESAMPLE_PERIOD=1..1024` | `16` (`1` = stock) |
-| `0003` UBWC diagnostics | `TU_DEBUG=perf` logs large color attachments that ended up uncompressed; `TU_DEBUG=startup` logs the kernel's UBWC version | `TU_DEBUG=perf` / `startup` | log only, no behaviour change |
-| `0004` GPU frequency hint | Asks KGSL to hold the GPU at a percentage of its maximum clock. Experimental, the kernel may ignore it | `TU_KGSL_PWR_PERCENT=2..100` | off |
+| `0001` autotune settles | The bandwidth autotuner reads a GPU samples-passed counter around every render pass. Once a pass's average has had enough updates it measures only 1 in N executions, which saves GPU commands and CPU post-processing | `TU_AUTOTUNE_SETTLE=4..1000`, `TU_AUTOTUNE_RESAMPLE=1..100000` | `24`, `32` (`RESAMPLE=1` = stock) |
+| `0002` anisotropy cap | Caps the anisotropic filtering a game requests (games often ask for 16x), which cuts texture-unit work and memory traffic with little visible change on a phone screen | `TU_MAX_ANISOTROPY=1..16` | `8` (`16` = stock) |
+| `0003` concurrent binning | Turns on concurrent binning (A7xx) by default: binning of the next render pass overlaps the current one. Upstream keeps it off because it hurts desktop games with many small passes | `TU_DEBUG=nocb` turns it off | on |
+| `0004` SYSMEM margin | The autotuner picks SYSMEM (straight to DDR) only when its bandwidth estimate wins by a margin, so near-ties go to on-chip GMEM | `TU_AUTOTUNE_SYSMEM_MARGIN=0..50` | `10` (`0` = stock) |
+
+`0004` uses a helper added by `0001`, so keep them together or port the helper.
 
 Build side: `config.env` has `LTO=thin` (default) or `LTO=off`. With `thin` the build tries ThinLTO first and falls back
 to a plain build if it fails. The result is recorded in the zip's `meta.json` description.
 
-**Status:** the defaults (`125`, `16`) are starting points, not measured values. The patches were checked against Mesa
-`main` as of May 2026 and have not been run on a device yet. To compare, play the same scene for 10-15 minutes and note
-FPS, temperature and battery drop with `TU_AUTOTUNE_SYSMEM_PENALTY=100 TU_AUTOTUNE_RESAMPLE_PERIOD=1` (stock behaviour)
-against the defaults.
+**Status:** these patches were written against Mesa `main` as of 20 Nov 2026 (commit `3d9907d`) using that exact
+source, but they have not been compiled or run on a device yet. The defaults are starting points, not measured values.
+To compare, play the same scene for 10-15 minutes and note FPS, temperature and battery drop with the stock settings
+(`TU_AUTOTUNE_RESAMPLE=1 TU_MAX_ANISOTROPY=16 TU_AUTOTUNE_SYSMEM_MARGIN=0 TU_DEBUG=nocb`) against the defaults.
 
 ## Config
 

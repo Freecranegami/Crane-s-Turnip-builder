@@ -1,0 +1,44 @@
+From 8a3c4d94a2d998b75657c57baf2e463d053b7a7a Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Fri, 20 Nov 2026 08:52:53 +0000
+Subject: [PATCH 2/4] tu/sampler: cap the requested anisotropy at 8x
+
+Games commonly request 16x. The extra taps cost texture-unit work and memory
+traffic for a difference that is hard to see on a phone screen. Cap the
+request at 8x by default; TU_MAX_ANISOTROPY=16 restores the stock behaviour and
+1 disables anisotropic filtering.
+---
+ src/freedreno/vulkan/tu_sampler.cc | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/tu_sampler.cc b/src/freedreno/vulkan/tu_sampler.cc
+index 2743773..7622cc9 100644
+--- a/src/freedreno/vulkan/tu_sampler.cc
++++ b/src/freedreno/vulkan/tu_sampler.cc
+@@ -11,6 +11,7 @@
+ 
+ #include "tu_device.h"
+ #include "tu_util.h"
++#include "util/u_debug.h"
+ 
+ template <chip CHIP>
+ VKAPI_ATTR VkResult VKAPI_CALL
+@@ -104,8 +105,14 @@ tu_CreateSampler(VkDevice _device,
+       }
+    }
+ 
++   /* Games commonly ask for 16x. Above 8x the extra taps cost texture-unit work and memory traffic for a difference
++    * that is hard to see on a phone screen, so the request is capped. TU_MAX_ANISOTROPY=16 restores the stock behaviour,
++    * 1 turns anisotropic filtering off.
++    */
++   static const uint32_t max_aniso_cap =
++      (uint32_t) CLAMP(debug_get_num_option("TU_MAX_ANISOTROPY", 8), 1, 16);
+    unsigned aniso = pCreateInfo->anisotropyEnable ?
+-      util_last_bit(MIN2(static_cast<uint32_t>(pCreateInfo->maxAnisotropy) >> 1, 8)) : 0;
++      util_last_bit(MIN2(MIN2(static_cast<uint32_t>(pCreateInfo->maxAnisotropy), max_aniso_cap) >> 1, 8)) : 0;
+    bool miplinear = (pCreateInfo->mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR);
+    float min_lod = CLAMP(pCreateInfo->minLod, 0.0f, 4095.0f / 256.0f);
+    float max_lod = CLAMP(pCreateInfo->maxLod, 0.0f, 4095.0f / 256.0f);
+-- 
+2.43.0
+

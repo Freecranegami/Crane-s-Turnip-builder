@@ -1,0 +1,35 @@
+From 7bb918c8edc64d0322be46341242786cb71b37c2 Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Fri, 20 Nov 2026 08:52:58 +0000
+Subject: [PATCH 3/4] tu: enable concurrent binning by default (A7xx)
+
+Concurrent binning lets the GPU bin the next render pass while the current one
+is still being rendered. Upstream leaves it off because it regresses desktop
+games that issue many small passes. Native Android games typically render a
+few large passes per frame, where the overlap shortens the frame and lets the
+GPU governor settle at a lower clock for the same frame rate.
+
+TU_DEBUG=nocb turns it off again, and the tu_allow_concurrent_binning driconf
+option still overrides the default per application.
+---
+ src/freedreno/vulkan/tu_drirc_gen.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_drirc_gen.py b/src/freedreno/vulkan/tu_drirc_gen.py
+index b46cc2f..066f8b2 100644
+--- a/src/freedreno/vulkan/tu_drirc_gen.py
++++ b/src/freedreno/vulkan/tu_drirc_gen.py
+@@ -28,8 +28,8 @@ def declare_options():
+     ]
+ 
+     perf_options = [
+-        B("tu_allow_concurrent_binning", False,
+-          "Allow concurrent binning on A7XX+, the CB is disabled by default because it regresses performance on desktop games",
++        B("tu_allow_concurrent_binning", True,
++          "Allow concurrent binning on A7XX+. Upstream disables it by default because it regresses performance on desktop games; this build enables it, TU_DEBUG=nocb turns it off",
+           c_name="allow_concurrent_binning"),
+         B("tu_independent_icache_miss", False,
+           "On A750, let each wave handle its instruction cache misses independently instead of stalling all waves together, which helps when waves fetch divergent code and hurts when they would take the same miss",
+-- 
+2.43.0
+

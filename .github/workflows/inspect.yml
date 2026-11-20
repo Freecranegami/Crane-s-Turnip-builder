@@ -1,0 +1,22 @@
+name: Inspect Mesa
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the Turnip sources of the tracked Mesa ref
+        run: |
+          source config.env
+          git clone --depth 1 --branch "$MESA_REF" "$MESA_REPO" mesa
+          git -C mesa log -1 --format='%H %cd' > mesa-info.txt
+          tar czf turnip-src.tgz mesa-info.txt -C mesa src/freedreno/vulkan src/freedreno/common src/freedreno/ir3/ir3_nir.c src/freedreno/ir3/ir3_compiler.c src/freedreno/drivers 2>/dev/null || tar czf turnip-src.tgz -C mesa src/freedreno/vulkan src/freedreno/common
+          ls -la turnip-src.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: turnip-src
+          path: turnip-src.tgz
+          retention-days: 2

@@ -1,0 +1,183 @@
+From ce0a3b5c11c05d73531f8903b951d5b44c48751e Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Fri, 20 Nov 2026 10:03:05 +0000
+Subject: [PATCH 5/6] tu: skip depth/stencil GMEM stores that nothing ever
+ reads (learned)
+
+On a tiler every attachment with storeOp STORE is written from GMEM back to
+DDR at the end of the pass. Many games store their depth buffer every frame
+although it is never read again, which costs several MB of DDR traffic per
+pass at phone resolutions.
+
+The driver watches depth/stencil images that have no reader usage (sampled,
+storage, input attachment, transfer source, host transfer, external export,
+sparse, subsampled) and that no render pass has ever loaded. After
+TU_DS_STORE_SKIP stores (default 300) it stops emitting their stores. If a
+pass loads the image later, stores resume immediately and the image is never
+skipped again; that single load may see stale depth.
+
+TU_DS_STORE_SKIP=0 disables the mechanism. TU_DEBUG=perf logs when an image
+starts or stops being skipped.
+---
+ src/freedreno/vulkan/tu_cmd_buffer.cc | 98 +++++++++++++++++++++++++++
+ src/freedreno/vulkan/tu_image.h       |  7 ++
+ 2 files changed, 105 insertions(+)
+
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index e9c7454..4af2b93 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -17,6 +17,7 @@
+ #include "common/freedreno_gpu_event.h"
+ #include "common/freedreno_lrz.h"
+ #include "common/freedreno_vrs.h"
++#include "util/u_debug.h"
+ #include "tu_autotune.h"
+ #include "tu_buffer.h"
+ #include "tu_clear_blit.h"
+@@ -2058,6 +2059,99 @@ tu6_emit_gmem_resolves(struct tu_cmd_buffer *cmd,
+    }
+ }
+ 
++/* Learned skipping of depth/stencil stores.
++ *
++ * A tiler writes every attachment that has storeOp STORE from GMEM back to DDR at the end of the pass. Many games store
++ * their depth buffer every frame although nothing ever reads it again, and on a phone that is several MB of DDR traffic
++ * per pass. The driver cannot know the future, but it can see two things:
++ *
++ *  - Nothing outside a render pass can read the image unless its usage says so (sampling, storage, input attachment,
++ *    transfer source, host transfer, external export). Such images are never touched here.
++ *  - Inside a render pass the old contents are only read when the pass loads the attachment.
++ *
++ * So the driver counts the stores of an image that has none of those usages and has never been loaded. After
++ * TU_DS_STORE_SKIP stores (default 300, about five seconds at 60 fps) it stops emitting them. If a pass ever loads the
++ * image afterwards, stores resume at once and the image is never skipped again; that one load may see stale depth, which
++ * is a single-frame glitch in a case that never happened for the whole warm-up. TU_DS_STORE_SKIP=0 turns the whole
++ * mechanism off.
++ */
++static uint32_t
++tu_ds_store_skip_threshold()
++{
++   static const uint32_t threshold =
++      (uint32_t) CLAMP(debug_get_num_option("TU_DS_STORE_SKIP", 300), 0, 1000000);
++   return threshold;
++}
++
++static bool
++tu_ds_image_eligible(const struct tu_image *image)
++{
++   const VkImageUsageFlags readers =
++      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
++      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
++      VK_IMAGE_USAGE_HOST_TRANSFER_BIT;
++
++   if (image->vk.usage & readers)
++      return false;
++   if ((image->vk.stencil_usage & readers) && image->vk.stencil_usage != 0)
++      return false;
++   if (image->vk.external_handle_types)
++      return false;
++   if (image->vk.create_flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
++                                 VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT))
++      return false;
++   return true;
++}
++
++/* Called when a render pass begins: remember which depth/stencil images it loads. */
++static void
++tu_ds_note_loads(struct tu_cmd_buffer *cmd)
++{
++   if (!tu_ds_store_skip_threshold())
++      return;
++
++   const struct tu_render_pass *pass = cmd->state.pass;
++   for (uint32_t i = 0; i < pass->attachment_count; i++) {
++      const struct tu_render_pass_attachment *att = &pass->attachments[i];
++      const struct tu_image_view *iview = cmd->state.attachments[i];
++      if (!iview || !(att->load || att->load_stencil) ||
++          !vk_format_is_depth_or_stencil(att->format))
++         continue;
++      if (!p_atomic_read(&iview->image->ds_loaded)) {
++         if (p_atomic_read(&iview->image->ds_stores) >= tu_ds_store_skip_threshold())
++            perf_debug(cmd->device, "depth/stencil image %ux%u is loaded after all, resuming its stores",
++                       iview->image->vk.extent.width, iview->image->vk.extent.height);
++         p_atomic_set(&iview->image->ds_loaded, 1);
++      }
++   }
++}
++
++/* True when the GMEM store of attachment a can be left out. */
++static bool
++tu_ds_skip_store(struct tu_cmd_buffer *cmd, uint32_t a)
++{
++   const uint32_t threshold = tu_ds_store_skip_threshold();
++   if (!threshold)
++      return false;
++
++   const struct tu_render_pass_attachment *att = &cmd->state.pass->attachments[a];
++   const struct tu_image_view *iview = cmd->state.attachments[a];
++   if (!iview || !vk_format_is_depth_or_stencil(att->format) || !(att->store || att->store_stencil))
++      return false;
++
++   struct tu_image *image = iview->image;
++   if (p_atomic_read(&image->ds_loaded) || !tu_ds_image_eligible(image))
++      return false;
++
++   uint32_t seen = p_atomic_inc_return(&image->ds_stores);
++   if (seen < threshold)
++      return false;
++   if (seen == threshold)
++      perf_debug(cmd->device, "skipping the depth/stencil store of %ux%u image, no load seen in %u passes",
++                 image->vk.extent.width, image->vk.extent.height, threshold);
++   return true;
++}
++
+ /* Emits any tile stores at the end of a subpass.
+  *
+  * These are emitted into draw_cs for non-final subpasses, and tile_store_cs for
+@@ -2115,6 +2209,8 @@ tu6_emit_gmem_stores(struct tu_cmd_buffer *cmd,
+       const struct tu_render_pass_attachment *att = &pass->attachments[a];
+       /* Note: att->cond_store_allowed implies at least one of att->store_* set */
+       if (pass->attachments[a].gmem && att->last_subpass_idx == subpass_idx) {
++         if (tu_ds_skip_store(cmd, a))
++            continue;
+          if (!scissor_emitted && !per_layer_render_area) {
+             tu6_emit_blit_scissor(cmd, cs, 0, true);
+             scissor_emitted = true;
+@@ -7241,6 +7337,7 @@ tu_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
+       }
+    }
+ 
++   tu_ds_note_loads(cmd);
+    tu_choose_gmem_layout(cmd);
+ 
+    /* Note: because this is external, any flushes will happen before draw_cs
+@@ -7458,6 +7555,7 @@ tu_CmdBeginRendering(VkCommandBuffer commandBuffer,
+       return;
+    }
+ 
++   tu_ds_note_loads(cmd);
+    tu_choose_gmem_layout(cmd);
+ 
+    cmd->state.renderpass_cache.pending_flush_bits =
+diff --git a/src/freedreno/vulkan/tu_image.h b/src/freedreno/vulkan/tu_image.h
+index 28de982..f650d8e 100644
+--- a/src/freedreno/vulkan/tu_image.h
++++ b/src/freedreno/vulkan/tu_image.h
+@@ -49,6 +49,13 @@ struct tu_image
+     * appear on an image that reaches a render pass.
+     */
+    uint64_t id;
++
++   /* Learned per image, see tu_ds_skip_store() in tu_cmd_buffer.cc. Both are
++    * accessed with p_atomic_*, since several command buffers may be recorded
++    * at once.
++    */
++   uint32_t ds_stores; /* GMEM stores of this depth/stencil image seen so far */
++   uint32_t ds_loaded; /* a render pass has ever loaded this image's contents */
+ };
+ VK_DEFINE_NONDISP_HANDLE_CASTS(tu_image, vk.base, VkImage, VK_OBJECT_TYPE_IMAGE)
+ 
+-- 
+2.43.0
+

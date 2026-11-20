@@ -36,7 +36,10 @@ switch, so a build can be A/B tested without rebuilding. Set the variables in th
 | `0003` concurrent binning | Turns on concurrent binning (A7xx) by default: binning of the next render pass overlaps the current one. Upstream keeps it off because it hurts desktop games with many small passes | `TU_DEBUG=nocb` turns it off | on |
 | `0004` SYSMEM margin | The autotuner picks SYSMEM (straight to DDR) only when its bandwidth estimate wins by a margin, so near-ties go to on-chip GMEM | `TU_AUTOTUNE_SYSMEM_MARGIN=0..50` | `10` (`0` = stock) |
 
-`0004` uses a helper added by `0001`, so keep them together or port the helper.
+| `0005` depth store skipping | Games often write their depth buffer to DDR every frame although nothing reads it. The driver watches depth/stencil images that have no reader usage (sampled, storage, input attachment, transfer source, host transfer, external) and that no pass has ever loaded; after 300 stores it stops emitting them. If a pass loads the image later, stores resume at once (one frame of stale depth at worst) | `TU_DS_STORE_SKIP=0..` | `300` (`0` = off) |
+| `0006` profile switch | One variable that puts every custom default back to upstream behaviour, for quick A/B tests. The individual switches still override it | `TU_PROFILE=stock` | `mobile` |
+
+`0004` and `0006` use a helper added by `0001`/`0006`, so keep the series in order.
 
 Build side: `config.env` has `LTO=thin` (default) or `LTO=off`. With `thin` the build tries ThinLTO first and falls back
 to a plain build if it fails. The result is recorded in the zip's `meta.json` description.
@@ -44,7 +47,7 @@ to a plain build if it fails. The result is recorded in the zip's `meta.json` de
 **Status:** these patches were written against Mesa `main` as of 20 Nov 2026 (commit `3d9907d`) using that exact
 source, but they have not been compiled or run on a device yet. The defaults are starting points, not measured values.
 To compare, play the same scene for 10-15 minutes and note FPS, temperature and battery drop with the stock settings
-(`TU_AUTOTUNE_RESAMPLE=1 TU_MAX_ANISOTROPY=16 TU_AUTOTUNE_SYSMEM_MARGIN=0 TU_DEBUG=nocb`) against the defaults.
+(`TU_PROFILE=stock`) against the defaults.
 
 ## Config
 

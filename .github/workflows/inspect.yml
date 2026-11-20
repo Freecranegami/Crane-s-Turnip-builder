@@ -3,20 +3,26 @@ name: Inspect Mesa
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   inspect:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch the Turnip sources of the tracked Mesa ref
+      - name: Publish the current Turnip sources on the inspect-src branch
         run: |
           source config.env
           git clone --depth 1 --branch "$MESA_REF" "$MESA_REPO" mesa
-          git -C mesa log -1 --format='%H %cd' > mesa-info.txt
-          tar czf turnip-src.tgz mesa-info.txt -C mesa src/freedreno/vulkan src/freedreno/common src/freedreno/ir3/ir3_nir.c src/freedreno/ir3/ir3_compiler.c src/freedreno/drivers 2>/dev/null || tar czf turnip-src.tgz -C mesa src/freedreno/vulkan src/freedreno/common
-          ls -la turnip-src.tgz
-      - uses: actions/upload-artifact@v4
-        with:
-          name: turnip-src
-          path: turnip-src.tgz
-          retention-days: 2
+          mkdir snap
+          git -C mesa log -1 --format='%H %cd' > snap/mesa-info.txt
+          for d in src/freedreno/vulkan src/freedreno/common src/freedreno/ir3 src/freedreno/fdl src/freedreno/registers/adreno/adreno_pm4.xml; do
+            mkdir -p "snap/$(dirname $d)"; cp -r "mesa/$d" "snap/$(dirname $d)/"
+          done
+          cd snap
+          git init -q -b inspect-src
+          git config user.name ci; git config user.email ci@localhost
+          git add -A; git commit -qm "Mesa sources for inspection"
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push -f origin inspect-src

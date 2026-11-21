@@ -1,0 +1,148 @@
+From 3edaf358f2f684a592879503656bfdde448e56bc Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Sat, 21 Nov 2026 07:36:17 +0000
+Subject: [PATCH] tu: compile the pipelines of one vkCreateGraphicsPipelines
+ call on a few threads
+
+Native games warm up many pipelines in a single call; the stock driver
+compiles them serially. Each pipeline is independent, so use up to
+TU_PAR_PIPELINES (default 3, 0 = off, stock profile = off) threads.
+Skipped for app allocators, early-return-on-failure and tiny batches.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MogdN58uDnrucKZbjLvtGn
+---
+ src/freedreno/vulkan/tu_pipeline.cc | 103 ++++++++++++++++++++++++++++
+ 1 file changed, 103 insertions(+)
+
+diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipeline.cc
+index 5f06dd5..1bc0c78 100644
+--- a/src/freedreno/vulkan/tu_pipeline.cc
++++ b/src/freedreno/vulkan/tu_pipeline.cc
+@@ -9,6 +9,9 @@
+ 
+ #include "tu_pipeline.h"
+ 
++#include <atomic>
++#include <pthread.h>
++
+ #include "nir/nir.h"
+ #include "nir/nir_builder.h"
+ #include "nir/nir_serialize.h"
+@@ -4929,6 +4932,101 @@ tu_graphics_pipeline_create(VkDevice device,
+    return result;
+ }
+ 
++/* Native mobile games usually create many pipelines in one vkCreateGraphicsPipelines call (a warm-up pass behind a
++ * loading screen) and the stock driver compiles them one after another on the calling thread. Every pipeline here is
++ * independent, so a few worker threads cut the wall-clock time of that call; total CPU work stays the same, it just
++ * finishes sooner and the big cores can go back to idle. Nothing is shared between workers except the (thread-safe)
++ * pipeline cache and the per-call work counter. Skipped when the app uses its own allocator callbacks, when it asks
++ * for early return on failure, or for a small batch.  TU_PAR_PIPELINES=N sets the thread cap (0 = off, default 3). */
++template <chip CHIP>
++struct tu_par_gfx_ctx {
++   VkDevice device;
++   VkPipelineCache cache;
++   uint32_t count;
++   const VkGraphicsPipelineCreateInfo *infos;
++   VkPipeline *pipelines;
++   VkResult *results;
++   std::atomic<uint32_t> next;
++};
++
++template <chip CHIP>
++static void *
++tu_par_gfx_worker(void *arg)
++{
++   tu_par_gfx_ctx<CHIP> *c = (tu_par_gfx_ctx<CHIP> *) arg;
++   for (;;) {
++      uint32_t i = c->next.fetch_add(1);
++      if (i >= c->count)
++         break;
++      VkPipelineCreateFlags2KHR flags = vk_graphics_pipeline_create_flags(&c->infos[i]);
++      c->results[i] = tu_graphics_pipeline_create<CHIP>(c->device, c->cache, &c->infos[i], flags, NULL,
++                                                        &c->pipelines[i]);
++   }
++   return NULL;
++}
++
++template <chip CHIP>
++static bool
++tu_try_parallel_graphics_pipelines(VkDevice device, VkPipelineCache cache, uint32_t count,
++                                   const VkGraphicsPipelineCreateInfo *infos, VkPipeline *pipelines,
++                                   VkResult *final_result)
++{
++   static const uint32_t cap = (uint32_t) CLAMP(
++      debug_get_num_option("TU_PAR_PIPELINES", tu_stock_profile() ? 0 : 3), 0, 8);
++   if (cap < 2 || count < 3)
++      return false;
++
++   for (uint32_t i = 0; i < count; i++) {
++      if (vk_graphics_pipeline_create_flags(&infos[i]) & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT_KHR)
++         return false;
++   }
++
++   uint32_t nthreads = MIN2(cap, count);
++   VkResult *results = (VkResult *) calloc(count, sizeof(VkResult));
++   tu_par_gfx_ctx<CHIP> *ctx = new tu_par_gfx_ctx<CHIP>();
++   if (!results || !ctx) {
++      free(results);
++      delete ctx;
++      return false;
++   }
++   ctx->device = device;
++   ctx->cache = cache;
++   ctx->count = count;
++   ctx->infos = infos;
++   ctx->pipelines = pipelines;
++   ctx->results = results;
++   ctx->next = 0;
++
++   pthread_t threads[8];
++   uint32_t started = 0;
++   pthread_attr_t attr;
++   bool have_attr = pthread_attr_init(&attr) == 0;
++   if (have_attr)
++      pthread_attr_setstacksize(&attr, 4 * 1024 * 1024);
++   for (uint32_t t = 0; t + 1 < nthreads; t++) {
++      if (pthread_create(&threads[started], have_attr ? &attr : NULL, tu_par_gfx_worker<CHIP>, ctx) == 0)
++         started++;
++   }
++   if (have_attr)
++      pthread_attr_destroy(&attr);
++
++   /* the calling thread works too, so a failed pthread_create just means less parallelism */
++   tu_par_gfx_worker<CHIP>(ctx);
++   for (uint32_t t = 0; t < started; t++)
++      pthread_join(threads[t], NULL);
++
++   for (uint32_t i = 0; i < count; i++) {
++      if (results[i] != VK_SUCCESS) {
++         *final_result = results[i];
++         pipelines[i] = VK_NULL_HANDLE;
++      }
++   }
++
++   free(results);
++   delete ctx;
++   return true;
++}
++
+ template <chip CHIP>
+ VKAPI_ATTR VkResult VKAPI_CALL
+ tu_CreateGraphicsPipelines(VkDevice device,
+@@ -4942,6 +5040,11 @@ tu_CreateGraphicsPipelines(VkDevice device,
+    VkResult final_result = VK_SUCCESS;
+    uint32_t i = 0;
+ 
++   if (!pAllocator &&
++       tu_try_parallel_graphics_pipelines<CHIP>(device, pipelineCache, count, pCreateInfos, pPipelines,
++                                                &final_result))
++      return final_result;
++
+    for (; i < count; i++) {
+       VkPipelineCreateFlags2KHR flags =
+          vk_graphics_pipeline_create_flags(&pCreateInfos[i]);
+-- 
+2.43.0
+

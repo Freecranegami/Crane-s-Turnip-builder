@@ -40,6 +40,7 @@ switch, so a build can be A/B tested without rebuilding. Set the variables in th
 | `0006` profile switch | One variable that puts every custom default back to upstream behaviour, for quick A/B tests. The individual switches still override it | `TU_PROFILE=stock` | `mobile` |
 
 | `0007` stats and small-pass knob | `TU_STATS=1` prints a line every 5 s: passes in GMEM and SYSMEM (and how many were forced rather than chosen), and depth stores skipped. `TU_AUTOTUNE_SMALL_RP=<draws>` makes the autotuner's "ignore passes under 5 draws" rule adjustable | `TU_STATS=1`, `TU_AUTOTUNE_SMALL_RP` | off, `5` (unchanged) |
+| `0008` parallel pipeline compile | Compiles the pipelines of a single `vkCreateGraphicsPipelines` call on up to 3 threads (the calling thread included), so loading-screen warm-ups finish sooner. Same total CPU work. Skipped for tiny batches, app allocators and early-return-on-failure | `TU_PAR_PIPELINES=<threads>` (0 = off) | `3` (stock profile: off) |
 
 `0004` and `0006` use a helper added by `0001`/`0006`, so keep the series in order.
 

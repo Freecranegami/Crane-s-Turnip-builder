@@ -39,6 +39,8 @@ switch, so a build can be A/B tested without rebuilding. Set the variables in th
 | `0005` depth store skipping | Games often write their depth buffer to DDR every frame although nothing reads it. The driver watches depth/stencil images that have no reader usage (sampled, storage, input attachment, transfer source, host transfer, external) and that no pass has ever loaded; after 300 stores it stops emitting them. If a pass loads the image later, stores resume at once (one frame of stale depth at worst) | `TU_DS_STORE_SKIP=0..` | `300` (`0` = off) |
 | `0006` profile switch | One variable that puts every custom default back to upstream behaviour, for quick A/B tests. The individual switches still override it | `TU_PROFILE=stock` | `mobile` |
 
+| `0007` stats and small-pass knob | `TU_STATS=1` prints a line every 5 s: passes in GMEM and SYSMEM (and how many were forced rather than chosen), and depth stores skipped. `TU_AUTOTUNE_SMALL_RP=<draws>` makes the autotuner's "ignore passes under 5 draws" rule adjustable | `TU_STATS=1`, `TU_AUTOTUNE_SMALL_RP` | off, `5` (unchanged) |
+
 `0004` and `0006` use a helper added by `0001`/`0006`, so keep the series in order.
 
 Build side: `config.env` has `LTO=thin` (default) or `LTO=off`. With `thin` the build tries ThinLTO first and falls back

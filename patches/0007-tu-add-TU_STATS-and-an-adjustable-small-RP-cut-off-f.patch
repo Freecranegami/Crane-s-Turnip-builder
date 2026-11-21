@@ -1,0 +1,134 @@
+From db7b664d4a99a54d8a54e661a1fd391d2a9161a5 Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Sat, 21 Nov 2026 07:02:01 +0000
+Subject: [PATCH 7/7] tu: add TU_STATS and an adjustable small-RP cut-off for
+ native game tuning
+
+TU_STATS=1 prints a line every five seconds with how many render passes went to
+GMEM and SYSMEM (and how many of those were forced rather than chosen by the
+autotuner) and how many depth/stencil stores were skipped, so the effect of the
+mobile defaults can be read from the log of a real game.
+
+The autotuner ignores render passes with fewer than five draws, a rule made for
+translation layers whose pass boundaries are inconsistent. Native games have
+stable passes, so TU_AUTOTUNE_SMALL_RP=<draws> makes the cut-off adjustable
+(default 5 = unchanged, 0 tunes every pass) for A/B testing on a device.
+---
+ src/freedreno/vulkan/tu_autotune.cc   |  6 ++-
+ src/freedreno/vulkan/tu_cmd_buffer.cc | 61 +++++++++++++++++++++++++--
+ 2 files changed, 63 insertions(+), 4 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_autotune.cc b/src/freedreno/vulkan/tu_autotune.cc
+index a81b837..3cfed2e 100644
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -1894,7 +1894,11 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
+     *
+     * Note: If we detect a small RP to be latency sensitive, we enable the autotuner for it anyway.
+     */
+-   bool ignore_small_rp = !config.test(mod_flag::TUNE_SMALL) && rp_state->drawcall_count < 5 &&
++   /* Native games often have a few cheap passes with few draws and a few that are heavy, so the cut-off is adjustable:
++    * TU_AUTOTUNE_SMALL_RP=<draws> (default 5, 0 tunes every pass).
++    */
++   static const uint32_t small_rp_draws = autotune_env_u32("TU_AUTOTUNE_SMALL_RP", 5, 0, 1000);
++   bool ignore_small_rp = !config.test(mod_flag::TUNE_SMALL) && rp_state->drawcall_count < small_rp_draws &&
+                           (!latency_info || !latency_info->seen_latency_spike);
+ 
+    if (!enabled)
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index a989207..694ecbc 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -18,6 +18,7 @@
+ #include "common/freedreno_lrz.h"
+ #include "common/freedreno_vrs.h"
+ #include "util/u_debug.h"
++#include "util/os_time.h"
+ #include "tu_autotune.h"
+ #include "tu_buffer.h"
+ #include "tu_clear_blit.h"
+@@ -1416,10 +1417,51 @@ use_hw_binning(struct tu_cmd_buffer *cmd)
+    return vsc->binning_possible && vsc->binning_useful;
+ }
+ 
++/* TU_STATS=1 prints one line every five seconds with what happened to the render passes recorded since the last line:
++ * how many went to GMEM and to SYSMEM, how many of those were forced (no autotuner choice) and how many depth/stencil
++ * stores were skipped. It is meant for comparing games and settings on a phone; nothing is counted when it is off.
++ */
++struct tu_pass_stats {
++   uint32_t gmem_tuned, gmem_forced, sysmem_tuned, sysmem_forced;
++   uint32_t ds_skipped;
++   int64_t last_log_ns;
++};
++static struct tu_pass_stats g_tu_pass_stats;
++
+ static bool
+-use_sysmem_rendering(struct tu_cmd_buffer *cmd,
+-                     tu_autotune::rp_ctx_t *rp_ctx,
+-                     tu_autotune::rp_key_opt rp_key)
++tu_stats_enabled()
++{
++   static const bool enabled = debug_get_bool_option("TU_STATS", false);
++   return enabled;
++}
++
++static void
++tu_stats_note_pass(const struct tu_cmd_buffer *cmd, bool sysmem)
++{
++   const bool forced = cmd->state.rp.force_render_mode_reason != NULL;
++   uint32_t *counter = sysmem ? (forced ? &g_tu_pass_stats.sysmem_forced : &g_tu_pass_stats.sysmem_tuned)
++                              : (forced ? &g_tu_pass_stats.gmem_forced : &g_tu_pass_stats.gmem_tuned);
++   p_atomic_inc(counter);
++
++   const int64_t now = os_time_get_nano();
++   int64_t last = p_atomic_read(&g_tu_pass_stats.last_log_ns);
++   if (!last) {
++      p_atomic_cmpxchg(&g_tu_pass_stats.last_log_ns, 0, now);
++      return;
++   }
++   if (now - last < 5000000000ll || p_atomic_cmpxchg(&g_tu_pass_stats.last_log_ns, last, now) != last)
++      return;
++
++   mesa_logi("tu stats: %.1fs, passes GMEM %u (+%u forced), SYSMEM %u (+%u forced), depth/stencil stores skipped %u",
++             (now - last) / 1e9, p_atomic_xchg(&g_tu_pass_stats.gmem_tuned, 0), p_atomic_xchg(&g_tu_pass_stats.gmem_forced, 0),
++             p_atomic_xchg(&g_tu_pass_stats.sysmem_tuned, 0), p_atomic_xchg(&g_tu_pass_stats.sysmem_forced, 0),
++             p_atomic_xchg(&g_tu_pass_stats.ds_skipped, 0));
++}
++
++static bool
++use_sysmem_rendering_impl(struct tu_cmd_buffer *cmd,
++                          tu_autotune::rp_ctx_t *rp_ctx,
++                          tu_autotune::rp_key_opt rp_key)
+ {
+    if (TU_DEBUG(SYSMEM)) {
+       cmd->state.rp.force_render_mode_reason = "TU_DEBUG(SYSMEM)";
+@@ -1495,6 +1537,17 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
+    return optimal_mode == tu_autotune::render_mode::SYSMEM;
+ }
+ 
++static bool
++use_sysmem_rendering(struct tu_cmd_buffer *cmd,
++                     tu_autotune::rp_ctx_t *rp_ctx,
++                     tu_autotune::rp_key_opt rp_key)
++{
++   const bool sysmem = use_sysmem_rendering_impl(cmd, rp_ctx, rp_key);
++   if (tu_stats_enabled())
++      tu_stats_note_pass(cmd, sysmem);
++   return sysmem;
++}
++
+ /* Optimization: there is no reason to load gmem if there is no
+  * geometry to process. COND_REG_EXEC predicate is set here,
+  * but the actual skip happens in tu_load_gmem_attachment() and tile_store_cs,
+@@ -2149,6 +2202,8 @@ tu_ds_skip_store(struct tu_cmd_buffer *cmd, uint32_t a)
+    if (seen == threshold)
+       perf_debug(cmd->device, "skipping the depth/stencil store of %ux%u image, no load seen in %u passes",
+                  image->vk.extent.width, image->vk.extent.height, threshold);
++   if (tu_stats_enabled())
++      p_atomic_inc(&g_tu_pass_stats.ds_skipped);
+    return true;
+ }
+ 
+-- 
+2.43.0
+

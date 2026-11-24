@@ -26,4 +26,4 @@ code around them. Rebase it, regenerate it and keep the number prefix.
 
 ## Current series
 
-`0001` to `0008` are described in the top-level README.
+`0001` to `0009` are described in the top-level README.

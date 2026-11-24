@@ -1,0 +1,93 @@
+From acc9aff1ea9076e77d47971c5f75c31947ccf1be Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Tue, 24 Nov 2026 06:16:56 +0000
+Subject: [PATCH] tu/kgsl: add TU_GPU_PERC to hold the GPU at a percentage of
+ its maximum clock
+
+Opt-in (default off). Sets a KGSL power constraint on each queue context and
+marks command batches with KGSL_CMDBATCH_PWR_CONSTRAINT. If the kernel does not
+support it the ioctl fails and the driver carries on unchanged; the result is
+logged once per queue.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MogdN58uDnrucKZbjLvtGn
+---
+ src/freedreno/vulkan/tu_knl_kgsl.cc | 41 +++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index fc58382..a40ded3 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -17,6 +17,7 @@
+ #include "msm_kgsl.h"
+ 
+ #include "util/libsync.h"
++#include "util/log.h"
+ #include "util/os_file.h"
+ #include "util/timespec.h"
+ #include "util/u_debug.h"
+@@ -47,6 +48,41 @@ safe_ioctl(int fd, unsigned long request, void *arg)
+    return ret;
+ }
+ 
++/* TU_GPU_PERC=<2..100> asks the KGSL power controller to hold the GPU at that percentage of its maximum frequency
++ * while this context has work in flight (KGSL_PROP_PWR_CONSTRAINT, the same control Android's perf hints use). Off by
++ * default (0). A kernel that does not support it just rejects the ioctl and nothing changes. */
++static uint32_t
++kgsl_gpu_cap_percent(void)
++{
++   static const uint32_t perc =
++      (uint32_t) CLAMP(debug_get_num_option("TU_GPU_PERC", 0), 0, KGSL_CONSTRAINT_PWR_PERC_MAX);
++   return perc >= KGSL_CONSTRAINT_PWR_PERC_MIN ? perc : 0;
++}
++
++static void
++kgsl_apply_gpu_cap(struct tu_device *dev, uint32_t context_id)
++{
++   uint32_t perc = kgsl_gpu_cap_percent();
++   if (!perc)
++      return;
++
++   struct kgsl_device_constraint_pwrlevel pwr = { .level = perc };
++   struct kgsl_device_constraint constraint = {
++      .type = KGSL_CONSTRAINT_PWRLEVEL,
++      .context_id = context_id,
++      .data = &pwr,
++      .size = sizeof(pwr),
++   };
++   struct kgsl_device_getproperty prop = {
++      .type = KGSL_PROP_PWR_CONSTRAINT,
++      .value = &constraint,
++      .sizebytes = sizeof(constraint),
++   };
++
++   int ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_SETPROPERTY, &prop);
++   mesa_logi("TU_GPU_PERC=%u: power constraint %s", perc, ret ? "rejected by the kernel" : "applied");
++}
++
+ static int
+ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+ {
+@@ -62,6 +98,8 @@ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+ 
+    queue->msm_queue_id = req.drawctxt_id;
+ 
++   kgsl_apply_gpu_cap(dev, queue->msm_queue_id);
++
+    return 0;
+ }
+ 
+@@ -1725,6 +1763,9 @@ kgsl_queue_submit(struct tu_queue *queue, void *_submit,
+          .context_id = queue->msm_queue_id,
+       };
+ 
++      if (kgsl_gpu_cap_percent())
++         req.flags |= KGSL_CMDBATCH_PWR_CONSTRAINT;
++
+       if (profiling_buffer) {
+          req.flags |= KGSL_CMDBATCH_PROFILING;
+          req.objlist = reinterpret_cast<uintptr_t>(&profile_obj);
+-- 
+2.43.0
+

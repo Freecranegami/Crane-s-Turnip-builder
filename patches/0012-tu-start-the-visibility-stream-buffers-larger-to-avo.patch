@@ -1,0 +1,45 @@
+From 9894b43732318e7077852e6ab60fd87d1ca8e3d2 Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Tue, 24 Nov 2026 06:45:38 +0000
+Subject: [PATCH 12/14] tu: start the visibility stream buffers larger to avoid
+ warm-up overflow
+
+The binning visibility streams start small and are doubled only after an
+overflow is detected, so the first frames of a busy scene run with truncated
+streams and the pitch climbs one doubling per frame. Start at the size games
+typically settle at (draw 0x2000, prim 0x10000 bytes per pipe, instead of
+0x1000 and 0x4000). Only used where geometry exists, so no extra GPU work;
+the buffer is up to about 2 MiB larger. TU_PROFILE=stock keeps the old sizes
+and the existing overflow growth still applies.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MogdN58uDnrucKZbjLvtGn
+---
+ src/freedreno/vulkan/tu_device.cc | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index 9d9ac60..4b29233 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -3081,9 +3081,16 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
+    if (TU_DEBUG(GMEM_WARMUP)) {
+       device->vsc_draw_strm_pitch = 0x4000  + VSC_PAD;
+       device->vsc_prim_strm_pitch = 0x80000 + VSC_PAD;
+-   } else {
++   } else if (tu_stock_profile()) {
+       device->vsc_draw_strm_pitch = 0x1000 + VSC_PAD;
+       device->vsc_prim_strm_pitch = 0x4000 + VSC_PAD;
++   } else {
++      /* Busy 3D scenes overflow the small stock streams on the first frames and the driver only grows them after
++       * an overflow was seen (doubling each time), which costs a few slow frames after every game start. Start
++       * one doubling-step or two higher; the streams are only written where the scene has geometry, so no extra
++       * GPU work is done, the buffer is just larger (about 2 MiB more at most). */
++      device->vsc_draw_strm_pitch = 0x2000 + VSC_PAD;
++      device->vsc_prim_strm_pitch = 0x10000 + VSC_PAD;
+    }
+ 
+    if (device->vk.enabled_features.customBorderColors)
+-- 
+2.43.0
+

@@ -1,0 +1,36 @@
+From 82bf7a2cfe1bb0359a4e49ff99a7881b0460bcc8 Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Tue, 24 Nov 2026 06:45:38 +0000
+Subject: [PATCH 10/14] tu: allocate pipeline and shader memory in 512 KiB
+ blocks
+
+Every pipeline and shader binary is carved out of a suballocator. With 128 KiB
+blocks a game that creates a few hundred pipelines behind a loading screen asks
+the kernel for a new buffer object (an ioctl, a GPU mapping and an mmap) every
+few shaders. 512 KiB blocks cut those allocations to a quarter. The memory is
+only reserved address space and pages, the GPU does no extra work, so power
+draw is unchanged. TU_PROFILE=stock keeps the 128 KiB block.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MogdN58uDnrucKZbjLvtGn
+---
+ src/freedreno/vulkan/tu_device.cc | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index 8c23c29..9d9ac60 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -3090,7 +3090,8 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
+       global_size += TU_BORDER_COLOR_COUNT * sizeof(struct bcolor_entry);
+ 
+    tu_bo_suballocator_init(
+-      &device->pipeline_suballoc, device, 128 * 1024,
++      &device->pipeline_suballoc, device,
++      tu_stock_profile() ? 128 * 1024 : 512 * 1024,
+       static_cast<enum tu_bo_alloc_flags>(TU_BO_ALLOC_GPU_READ_ONLY |
+                                           TU_BO_ALLOC_ALLOW_DUMP |
+                                           TU_BO_ALLOC_INTERNAL_RESOURCE),
+-- 
+2.43.0
+

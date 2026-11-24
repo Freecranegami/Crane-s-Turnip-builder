@@ -1,0 +1,139 @@
+From 88a1738d20993faecae7b333932ee5a5974bae36 Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Tue, 24 Nov 2026 06:45:38 +0000
+Subject: [PATCH 11/14] tu/kgsl: answer fence polls from a retired-timestamp
+ cache
+
+vkGetFenceStatus and zero-timeout vkWaitForFences each cost a KGSL ioctl.
+Games poll many fences per frame, and timestamps of one context retire in
+order, so once a timestamp is known to be retired every older fence of that
+context is too. Keep the newest retired timestamp per context (updated by each
+poll and each successful wait) and answer from it before asking the kernel.
+Entries are cleared when a context is created or destroyed. No GPU work
+changes, only the number of syscalls. TU_PROFILE=stock disables the cache.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MogdN58uDnrucKZbjLvtGn
+---
+ src/freedreno/vulkan/tu_knl_kgsl.cc | 62 ++++++++++++++++++++++++++++-
+ 1 file changed, 61 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index a40ded3..0e30a67 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -3,6 +3,7 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include <atomic>
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <linux/dma-heap.h>
+@@ -83,6 +84,56 @@ kgsl_apply_gpu_cap(struct tu_device *dev, uint32_t context_id)
+    mesa_logi("TU_GPU_PERC=%u: power constraint %s", perc, ret ? "rejected by the kernel" : "applied");
+ }
+ 
++/* Cache of the newest timestamp known to be retired, one slot per KGSL context (slots are shared by context id modulo
++ * the slot count, so a neighbour just evicts the entry). Timestamps retire in order, so once timestamp T of a context
++ * is known to be retired every older fence of that context is too and vkGetFenceStatus / vkWaitForFences with a zero
++ * timeout can answer without an ioctl. Each slot packs (context << 32 | timestamp) so it is updated atomically. A
++ * context's slot is cleared when the context is created or destroyed, so a reused id never sees stale data. */
++#define TU_KGSL_TS_SLOTS 16
++static std::atomic<uint64_t> kgsl_ts_cache[TU_KGSL_TS_SLOTS];
++
++static inline bool
++kgsl_ts_at_least(uint32_t a, uint32_t b)
++{
++   return static_cast<int32_t>(a - b) >= 0;
++}
++
++static bool
++kgsl_ts_known_retired(unsigned context_id, unsigned timestamp)
++{
++   if (tu_stock_profile())
++      return false;
++   uint64_t v = kgsl_ts_cache[context_id % TU_KGSL_TS_SLOTS].load(std::memory_order_relaxed);
++   return v != 0 && static_cast<uint32_t>(v >> 32) == context_id &&
++          kgsl_ts_at_least(static_cast<uint32_t>(v), timestamp);
++}
++
++static void
++kgsl_ts_note_retired(unsigned context_id, unsigned timestamp)
++{
++   std::atomic<uint64_t> &slot = kgsl_ts_cache[context_id % TU_KGSL_TS_SLOTS];
++   uint64_t cur = slot.load(std::memory_order_relaxed);
++   for (;;) {
++      if (cur != 0 && static_cast<uint32_t>(cur >> 32) == context_id &&
++          kgsl_ts_at_least(static_cast<uint32_t>(cur), timestamp))
++         return; /* already holds a newer or equal timestamp */
++      uint64_t next = (static_cast<uint64_t>(context_id) << 32) | timestamp;
++      if (slot.compare_exchange_weak(cur, next, std::memory_order_relaxed))
++         return;
++   }
++}
++
++static void
++kgsl_ts_forget(unsigned context_id)
++{
++   std::atomic<uint64_t> &slot = kgsl_ts_cache[context_id % TU_KGSL_TS_SLOTS];
++   uint64_t cur = slot.load(std::memory_order_relaxed);
++   while (cur != 0 && static_cast<uint32_t>(cur >> 32) == context_id) {
++      if (slot.compare_exchange_weak(cur, 0, std::memory_order_relaxed))
++         break;
++   }
++}
++
+ static int
+ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+ {
+@@ -97,6 +148,7 @@ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+       return ret;
+ 
+    queue->msm_queue_id = req.drawctxt_id;
++   kgsl_ts_forget(req.drawctxt_id);
+ 
+    kgsl_apply_gpu_cap(dev, queue->msm_queue_id);
+ 
+@@ -110,6 +162,7 @@ kgsl_submitqueue_close(struct tu_device *dev, struct tu_queue *queue)
+       .drawctxt_id = queue->msm_queue_id,
+    };
+ 
++   kgsl_ts_forget(queue->msm_queue_id);
+    safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_DRAWCTXT_DESTROY, &req);
+ }
+ 
+@@ -952,6 +1005,9 @@ kgsl_timestamp_error(
+ static VkResult
+ kgsl_poll_timestamp(struct tu_device *device, unsigned int context_id, unsigned int timestamp)
+ {
++   if (kgsl_ts_known_retired(context_id, timestamp))
++      return VK_SUCCESS;
++
+    struct kgsl_cmdstream_readtimestamp_ctxtid read = {
+       .context_id = context_id,
+       .type = KGSL_TIMESTAMP_RETIRED,
+@@ -961,6 +1017,8 @@ kgsl_poll_timestamp(struct tu_device *device, unsigned int context_id, unsigned
+       return vk_errorf(device, VK_ERROR_UNKNOWN, "KGSL timestamp read failed: context %u, timestamp %u, errno %d (%s)",
+                        context_id, timestamp, errno, strerror(errno));
+ 
++   kgsl_ts_note_retired(context_id, read.timestamp);
++
+    return timestamp_cmp(read.timestamp, timestamp) ? VK_SUCCESS : VK_TIMEOUT;
+ }
+ 
+@@ -982,8 +1040,10 @@ wait_timestamp_safe(struct tu_device *device, unsigned int context_id, unsigned
+ 
+       wait.timeout = timeout_ms;
+       int ret = ioctl(device->fd, IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID, &wait);
+-      if (ret == 0)
++      if (ret == 0) {
++         kgsl_ts_note_retired(context_id, timestamp);
+          return VK_SUCCESS;
++      }
+ 
+       const int error = errno;
+       if (error != EINTR && error != EAGAIN)
+-- 
+2.43.0
+

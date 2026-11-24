@@ -1,0 +1,135 @@
+From 2cac38b8371e98331740e1849226792721e122be Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Tue, 24 Nov 2026 06:45:38 +0000
+Subject: [PATCH 14/14] tu: compile the pipelines of one
+ vkCreateComputePipelines call on a few threads
+
+Same approach as the graphics batch: compute pipelines of one call are
+independent, so a few worker threads (including the calling thread) finish the
+warm-up sooner for the same total CPU work. Skipped for small batches, with an
+app allocator, or with the early-return flag. Shares TU_PAR_PIPELINES with the
+graphics path (0 = off, default 3, TU_PROFILE=stock = off).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MogdN58uDnrucKZbjLvtGn
+---
+ src/freedreno/vulkan/tu_pipeline.cc | 96 +++++++++++++++++++++++++++++
+ 1 file changed, 96 insertions(+)
+
+diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipeline.cc
+index 1bc0c78..4f3d659 100644
+--- a/src/freedreno/vulkan/tu_pipeline.cc
++++ b/src/freedreno/vulkan/tu_pipeline.cc
+@@ -5236,6 +5236,97 @@ fail:
+    return result;
+ }
+ 
++/* Same idea as the graphics batch above, for vkCreateComputePipelines: engines that build compute pipelines in one
++ * call (skinning, culling, post-processing) compile them on a few threads. Uses the same TU_PAR_PIPELINES cap, the
++ * same restrictions (no app allocator, no early-return flag, at least 3 pipelines). */
++template <chip CHIP>
++struct tu_par_cs_ctx {
++   VkDevice device;
++   VkPipelineCache cache;
++   uint32_t count;
++   const VkComputePipelineCreateInfo *infos;
++   VkPipeline *pipelines;
++   VkResult *results;
++   std::atomic<uint32_t> next;
++};
++
++template <chip CHIP>
++static void *
++tu_par_cs_worker(void *arg)
++{
++   tu_par_cs_ctx<CHIP> *c = (tu_par_cs_ctx<CHIP> *) arg;
++   for (;;) {
++      uint32_t i = c->next.fetch_add(1);
++      if (i >= c->count)
++         break;
++      VkPipelineCreateFlags2KHR flags = vk_compute_pipeline_create_flags(&c->infos[i]);
++      c->results[i] = tu_compute_pipeline_create<CHIP>(c->device, c->cache, &c->infos[i], flags, NULL,
++                                                       &c->pipelines[i]);
++   }
++   return NULL;
++}
++
++template <chip CHIP>
++static bool
++tu_try_parallel_compute_pipelines(VkDevice device, VkPipelineCache cache, uint32_t count,
++                                  const VkComputePipelineCreateInfo *infos, VkPipeline *pipelines,
++                                  VkResult *final_result)
++{
++   static const uint32_t cap = (uint32_t) CLAMP(
++      debug_get_num_option("TU_PAR_PIPELINES", tu_stock_profile() ? 0 : 3), 0, 8);
++   if (cap < 2 || count < 3)
++      return false;
++
++   for (uint32_t i = 0; i < count; i++) {
++      if (vk_compute_pipeline_create_flags(&infos[i]) & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT_KHR)
++         return false;
++   }
++
++   uint32_t nthreads = MIN2(cap, count);
++   VkResult *results = (VkResult *) calloc(count, sizeof(VkResult));
++   tu_par_cs_ctx<CHIP> *ctx = new tu_par_cs_ctx<CHIP>();
++   if (!results || !ctx) {
++      free(results);
++      delete ctx;
++      return false;
++   }
++   ctx->device = device;
++   ctx->cache = cache;
++   ctx->count = count;
++   ctx->infos = infos;
++   ctx->pipelines = pipelines;
++   ctx->results = results;
++   ctx->next = 0;
++
++   pthread_t threads[8];
++   uint32_t started = 0;
++   pthread_attr_t attr;
++   bool have_attr = pthread_attr_init(&attr) == 0;
++   if (have_attr)
++      pthread_attr_setstacksize(&attr, 4 * 1024 * 1024);
++   for (uint32_t t = 0; t + 1 < nthreads; t++) {
++      if (pthread_create(&threads[started], have_attr ? &attr : NULL, tu_par_cs_worker<CHIP>, ctx) == 0)
++         started++;
++   }
++   if (have_attr)
++      pthread_attr_destroy(&attr);
++
++   tu_par_cs_worker<CHIP>(ctx);
++   for (uint32_t t = 0; t < started; t++)
++      pthread_join(threads[t], NULL);
++
++   for (uint32_t i = 0; i < count; i++) {
++      if (results[i] != VK_SUCCESS) {
++         *final_result = results[i];
++         pipelines[i] = VK_NULL_HANDLE;
++      }
++   }
++
++   free(results);
++   delete ctx;
++   return true;
++}
++
+ template <chip CHIP>
+ VKAPI_ATTR VkResult VKAPI_CALL
+ tu_CreateComputePipelines(VkDevice device,
+@@ -5249,6 +5340,11 @@ tu_CreateComputePipelines(VkDevice device,
+    VkResult final_result = VK_SUCCESS;
+    uint32_t i = 0;
+ 
++   if (!pAllocator &&
++       tu_try_parallel_compute_pipelines<CHIP>(device, pipelineCache, count, pCreateInfos, pPipelines,
++                                               &final_result))
++      return final_result;
++
+    for (; i < count; i++) {
+       VkPipelineCreateFlags2KHR flags =
+          vk_compute_pipeline_create_flags(&pCreateInfos[i]);
+-- 
+2.43.0
+

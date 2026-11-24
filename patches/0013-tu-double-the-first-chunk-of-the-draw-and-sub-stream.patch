@@ -1,0 +1,42 @@
+From feceeeeff5c6ffc6650a3b894341470472efedb4 Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Tue, 24 Nov 2026 06:45:38 +0000
+Subject: [PATCH 13/14] tu: double the first chunk of the draw and sub-stream
+ command streams
+
+A command buffer starts with small chunks (16 KiB draw stream, 8 KiB state
+sub-stream) and adds a buffer object, an ioctl plus mmap, and an IB entry for
+the kernel to walk every time one fills up. Normal game frames outgrow them,
+so start at 32 KiB and 16 KiB. The streams still double from there and the GPU
+executes the same commands, so power draw is unchanged; command buffers that
+are only lightly used cost 24 KiB more. TU_PROFILE=stock keeps the old sizes.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MogdN58uDnrucKZbjLvtGn
+---
+ src/freedreno/vulkan/tu_cmd_buffer.cc | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 694ecbc..7013e49 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -4428,10 +4428,13 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
+    }
+ 
+    tu_cs_init_ib1(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 4096, "cmd cs");
+-   tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 4096, "draw cs");
++   /* Bigger first chunks mean fewer buffer objects and fewer IB entries for the draw and state streams of a
++    * normal frame; the streams still double from there. TU_PROFILE=stock keeps the upstream sizes. */
++   const uint32_t cs_scale = tu_stock_profile() ? 1 : 2;
++   tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 4096 * cs_scale, "draw cs");
+    tu_cs_init(&cmd_buffer->tile_store_cs, device, TU_CS_MODE_GROW, 2048, "tile store cs");
+    tu_cs_init(&cmd_buffer->draw_epilogue_cs, device, TU_CS_MODE_GROW, 4096, "draw epilogue cs");
+-   tu_cs_init(&cmd_buffer->sub_cs, device, TU_CS_MODE_SUB_STREAM, 2048, "draw sub cs");
++   tu_cs_init(&cmd_buffer->sub_cs, device, TU_CS_MODE_SUB_STREAM, 2048 * cs_scale, "draw sub cs");
+    tu_cs_init(&cmd_buffer->pre_chain.draw_cs, device, TU_CS_MODE_GROW, 4096, "prechain draw cs");
+    tu_cs_init(&cmd_buffer->pre_chain.draw_epilogue_cs, device, TU_CS_MODE_GROW, 4096, "prechain draw epiligoue cs");
+ 
+-- 
+2.43.0
+

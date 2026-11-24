@@ -1,0 +1,51 @@
+From e6e7b6d2754c76982a1d7dd7df0db68d5bf12110 Mon Sep 17 00:00:00 2001
+From: turnip-custom <turnip-custom@localhost>
+Date: Tue, 24 Nov 2026 13:13:06 +0000
+Subject: [PATCH] tu: also compile batches of two pipelines in parallel
+
+The parallel graphics and compute pipeline paths skipped batches smaller than
+three. A batch of two splits across two threads for nearly half the wall time,
+and starting a helper thread costs far less than compiling a shader, so lower
+the minimum batch to two. The cap, the allocator and early-return restrictions
+and TU_PROFILE=stock are unchanged.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MogdN58uDnrucKZbjLvtGn
+---
+ src/freedreno/vulkan/tu_pipeline.cc | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipeline.cc
+index 4f3d659..f2365e7 100644
+--- a/src/freedreno/vulkan/tu_pipeline.cc
++++ b/src/freedreno/vulkan/tu_pipeline.cc
+@@ -4973,7 +4973,7 @@ tu_try_parallel_graphics_pipelines(VkDevice device, VkPipelineCache cache, uint3
+ {
+    static const uint32_t cap = (uint32_t) CLAMP(
+       debug_get_num_option("TU_PAR_PIPELINES", tu_stock_profile() ? 0 : 3), 0, 8);
+-   if (cap < 2 || count < 3)
++   if (cap < 2 || count < 2)
+       return false;
+ 
+    for (uint32_t i = 0; i < count; i++) {
+@@ -5238,7 +5238,7 @@ fail:
+ 
+ /* Same idea as the graphics batch above, for vkCreateComputePipelines: engines that build compute pipelines in one
+  * call (skinning, culling, post-processing) compile them on a few threads. Uses the same TU_PAR_PIPELINES cap, the
+- * same restrictions (no app allocator, no early-return flag, at least 3 pipelines). */
++ * same restrictions (no app allocator, no early-return flag, at least 2 pipelines). */
+ template <chip CHIP>
+ struct tu_par_cs_ctx {
+    VkDevice device;
+@@ -5274,7 +5274,7 @@ tu_try_parallel_compute_pipelines(VkDevice device, VkPipelineCache cache, uint32
+ {
+    static const uint32_t cap = (uint32_t) CLAMP(
+       debug_get_num_option("TU_PAR_PIPELINES", tu_stock_profile() ? 0 : 3), 0, 8);
+-   if (cap < 2 || count < 3)
++   if (cap < 2 || count < 2)
+       return false;
+ 
+    for (uint32_t i = 0; i < count; i++) {
+-- 
+2.43.0
+

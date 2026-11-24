@@ -35,13 +35,14 @@ environment of the game process (the same place you would put `TU_DEBUG`).
 | `0005` depth store skipping | Games often write their depth buffer to DDR every frame although nothing reads it. The driver watches depth/stencil images that have no reader usage (sampled, storage, input attachment, transfer source, host transfer, external) and that no pass has ever loaded; after 300 stores it stops emitting them. If a pass loads the image later, stores resume at once (one frame of stale depth at worst) | `TU_DS_STORE_SKIP=0..` | `300` (`0` = off) |
 | `0006` profile switch | One variable that puts every custom default back to upstream behaviour, for quick A/B tests. The individual switches still override it | `TU_PROFILE=stock` | `mobile` |
 | `0007` stats and small-pass knob | `TU_STATS=1` prints a line every 5 s: passes in GMEM and SYSMEM (and how many were forced rather than chosen), and depth stores skipped. `TU_AUTOTUNE_SMALL_RP=<draws>` makes the autotuner's "ignore passes under 5 draws" rule adjustable | `TU_STATS=1`, `TU_AUTOTUNE_SMALL_RP` | off, `5` (unchanged) |
-| `0008` parallel pipeline compile | Compiles the pipelines of a single `vkCreateGraphicsPipelines` call on up to 3 threads (the calling thread included), so loading-screen warm-ups finish sooner. Same total CPU work. Skipped for tiny batches, app allocators and early-return-on-failure | `TU_PAR_PIPELINES=<threads>` (0 = off) | `3` (stock profile: off) |
+| `0008` parallel pipeline compile | Compiles the pipelines of a single `vkCreateGraphicsPipelines` call on up to 3 threads (the calling thread included), so loading-screen warm-ups finish sooner. Same total CPU work. Skipped for single-pipeline batches, app allocators and early-return-on-failure | `TU_PAR_PIPELINES=<threads>` (0 = off) | `3` (stock profile: off) |
 | `0009` GPU clock hold | Opt-in: asks the KGSL power controller to hold the GPU at a percentage of its maximum clock while a queue has work (the control Android perf hints use). The kernel may ignore it; the result is logged once per queue | `TU_GPU_PERC=2..100` | off (`0`) |
 | `0010` bigger pipeline blocks | Pipelines and shader binaries are carved out of a suballocator; 512 KiB blocks instead of 128 KiB mean a quarter as many buffer-object allocations (ioctl, GPU map, mmap) while a game builds its pipelines. No GPU work changes | `TU_PROFILE=stock` | 512 KiB |
 | `0011` fence poll cache | `vkGetFenceStatus` and zero-timeout waits cost a KGSL ioctl each. Timestamps retire in order, so the newest known retired timestamp per context answers older fences without asking the kernel | `TU_PROFILE=stock` | on |
 | `0012` bigger visibility streams | The binning visibility streams start small and only double after an overflow, which costs slow frames after every game start. Start at draw 0x2000 / prim 0x10000 bytes per pipe (up to about 2 MiB more memory) | `TU_PROFILE=stock` | on |
 | `0013` bigger first command chunks | The draw and state sub-streams of a command buffer start at 32 KiB and 16 KiB instead of 16 KiB and 8 KiB, so a normal frame needs fewer buffer objects and IB entries | `TU_PROFILE=stock` | on |
 | `0014` parallel compute compile | The compute twin of `0008`: the pipelines of one `vkCreateComputePipelines` call are compiled on up to 3 threads | `TU_PAR_PIPELINES=<threads>` (0 = off) | `3` (stock profile: off) |
+| `0015` two-pipeline batches | Lowers the minimum batch for `0008` and `0014` from 3 pipelines to 2 | `TU_PAR_PIPELINES` | on |
 
 `TU_PROFILE=stock` puts every default above back to upstream behaviour in one go; the individual switches still
 override it. `TU_DEBUG=startup` prints which profile is active.
@@ -76,7 +77,7 @@ upstream moves and a patch stops applying, the CI build fails and prints the rej
 upstream code. Rebase the patch, keep its number prefix and open a pull request. Measurements from real devices
 (driver, game, settings, FPS, temperature, battery) are the most useful contribution.
 
-`0010` to `0014` aim at speed with the same GPU work, so power draw should stay the same. They are untested on a device,
+`0010` to `0015` aim at speed with the same GPU work, so power draw should stay the same. They are untested on a device,
 and the memory and call savings are not measured. `0004` and `0006` use a helper added by `0001`/`0006`, so keep the series in order.
 
 ## Licence
